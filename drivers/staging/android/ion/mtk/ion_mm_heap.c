@@ -18,9 +18,8 @@
 #include "ion_fb_heap.h"
 #include "ion_priv.h"
 #include "mtk/ion_drv.h"
-#ifdef CONFIG_MTK_M4U
 #include <m4u.h>
-#endif
+
 typedef struct {
 	struct mutex lock;
 	int eModuleID;
@@ -48,7 +47,7 @@ static unsigned int high_order_gfp_flags = (GFP_HIGHUSER | __GFP_ZERO
 		| __GFP_NOWARN | __GFP_NORETRY | __GFP_NO_KSWAPD) & ~__GFP_WAIT;
 static unsigned int low_order_gfp_flags = (GFP_HIGHUSER | __GFP_ZERO
 		| __GFP_NOWARN);
-static const unsigned int orders[] = { 2, 0 };
+static const unsigned int orders[] = { 1, 0 };
 /* static const unsigned int orders[] = {8, 4, 0}; */
 static const int num_orders = ARRAY_SIZE(orders);
 static int order_to_index(unsigned int order)
@@ -274,12 +273,12 @@ void ion_mm_heap_free_bufferInfo(struct ion_buffer *buffer)
 
 	if (pBufferInfo) {
 		mutex_lock(&(pBufferInfo->lock));
-#ifdef CONFIG_MTK_M4U
 		if ((pBufferInfo->destroy_fn) && (pBufferInfo->MVA))
 			pBufferInfo->destroy_fn(buffer, pBufferInfo->MVA);
+
 		if ((pBufferInfo->eModuleID != -1) && (pBufferInfo->MVA))
 			m4u_dealloc_mva_sg(pBufferInfo->eModuleID, table, buffer->size, pBufferInfo->MVA);
-#endif
+
 		mutex_unlock(&(pBufferInfo->lock));
 		kfree(pBufferInfo);
 	}
@@ -351,7 +350,7 @@ static int ion_mm_heap_phys(struct ion_heap *heap, struct ion_buffer *buffer,
 		return -EFAULT; /* Buffer not configured. */
 	}
 	/* Allocate MVA */
-#ifdef CONFIG_MTK_M4U
+
 	mutex_lock(&(pBufferInfo->lock));
 	if (pBufferInfo->MVA == 0) {
 		int ret = m4u_alloc_mva_sg(pBufferInfo->eModuleID, buffer->sg_table,
@@ -368,7 +367,7 @@ static int ion_mm_heap_phys(struct ion_heap *heap, struct ion_buffer *buffer,
 	*(unsigned int *) addr = pBufferInfo->MVA; /* MVA address */
 	mutex_unlock(&(pBufferInfo->lock));
 	*len = buffer->size;
-#endif
+
 	return 0;
 }
 
@@ -502,7 +501,9 @@ static int ion_mm_heap_debug_show(struct ion_heap *heap, struct seq_file *s, voi
 			for (m = rb_first(&client->handles); m; m = rb_next(m)) {
 				struct ion_handle
 				*handle = rb_entry(m, struct ion_handle, node);
+#if ION_RUNTIME_DEBUGGER
 				int i;
+#endif
 
 				ION_PRINT_LOG_OR_SEQ(s,
 						"\thandle=0x%p, buffer=0x%p, heap=%d, backtrace is:\n",
@@ -543,7 +544,7 @@ int ion_mm_heap_for_each_pool(int (*fn)(int high, int order, int cache,
 	return 0;
 }
 
-static int write_mm_page_pool(int high, int order, int cache, size_t size)
+/*static int write_mm_page_pool(int high, int order, int cache, size_t size)
 {
 	if (cache)
 		IONMSG("%s order_%u in cached_pool = %zu total\n", high ? "high" : "low", order, size);
@@ -551,7 +552,7 @@ static int write_mm_page_pool(int high, int order, int cache, size_t size)
 		IONMSG("%s order_%u in pool = %zu total\n", high ? "high" : "low", order, size);
 
 	return 0;
-}
+}*/
 
 static size_t ion_debug_mm_heap_total(struct ion_client *client, unsigned int id)
 {
@@ -636,74 +637,6 @@ void ion_mm_heap_memory_detail(void)
 	}
 }
 
-
-/* ACOS_MOD_BEGIN {fwk_crash_log_collection} */
-void lmk_add_to_buffer(const char *fmt, ...);
-
-void ion_mm_heap_memory_detail_lmk(void)
-{
-	struct ion_device *dev = g_ion_device;
-	/* struct ion_heap *heap = NULL; */
-	size_t total_size = 0;
-	size_t total_orphaned_size = 0;
-	struct rb_node *n;
-
-	lmk_add_to_buffer("%16.s(%16.s) %16.s %16.s %s\n",
-			"client", "dbg_name", "pid", "size", "address");
-	lmk_add_to_buffer("----------------------------------------------------\n");
-
-	if (!down_read_trylock(&dev->lock))
-		return;
-	for (n = rb_first(&dev->clients); n; n = rb_next(n)) {
-		struct ion_client
-		*client = rb_entry(n, struct ion_client, node);
-		size_t size = ion_debug_mm_heap_total(client, ION_HEAP_TYPE_MULTIMEDIA);
-
-		if (!size)
-			continue;
-		if (client->task) {
-			char task_comm[TASK_COMM_LEN];
-
-			get_task_comm(task_comm, client->task);
-			lmk_add_to_buffer("%16.s(%16.s) %16u %16zu 0x%p\n",
-					task_comm, client->dbg_name, client->pid, size, client);
-		} else {
-			lmk_add_to_buffer("%16.s(%16.s) %16u %16zu 0x%p\n",
-					client->name, "from_kernel", client->pid, size, client);
-		}
-	}
-	up_read(&dev->lock);
-	lmk_add_to_buffer("----------------------------------------------------\n");
-	lmk_add_to_buffer("orphaned allocations (info is from last known client):" "\n");
-
-	if (mutex_trylock(&dev->buffer_lock)) {
-		for (n = rb_first(&dev->buffers); n; n = rb_next(n)) {
-			struct ion_buffer
-			*buffer = rb_entry(n, struct ion_buffer, node);
-
-			if ((1 << buffer->heap->id) & ION_HEAP_MULTIMEDIA_MASK) {
-				/* heap = buffer->heap; */
-				total_size += buffer->size;
-				if (!buffer->handle_count) {
-					lmk_add_to_buffer("%16.s(%16.s) %16u %16zu %d %d\n", buffer->task_comm,
-							"orphan", buffer->pid, buffer->size, buffer->kmap_cnt,
-							atomic_read(&buffer->ref.refcount));
-					total_orphaned_size += buffer->size;
-				}
-			}
-		}
-		mutex_unlock(&dev->buffer_lock);
-
-		lmk_add_to_buffer("----------------------------------------------------\n");
-		lmk_add_to_buffer("%16.s %16zu\n", "total orphaned", total_orphaned_size);
-		lmk_add_to_buffer("%16.s %16zu\n", "total ", total_size);
-		lmk_add_to_buffer("----------------------------------------------------\n");
-	} else {
-		lmk_add_to_buffer("ion mm heap total memory: %16zu\n", mm_heap_total_memory);
-	}
-}
-/* ACOS_MOD_END {fwk_crash_log_collection} */
-
 size_t ion_mm_heap_total_memory(void)
 {
 	return mm_heap_total_memory;
@@ -721,7 +654,7 @@ struct ion_heap *ion_mm_heap_create(struct ion_platform_heap *unused)
 	}
 	heap->heap.ops = &system_heap_ops;
 	heap->heap.type = ION_HEAP_TYPE_MULTIMEDIA;
-	/* heap->heap.flags = ION_HEAP_FLAG_DEFER_FREE; */
+	heap->heap.flags = ION_HEAP_FLAG_DEFER_FREE;
 	heap->pools = kcalloc(num_orders, sizeof(struct ion_page_pool *), GFP_KERNEL);
 	if (!heap->pools)
 		goto err_alloc_pools;
