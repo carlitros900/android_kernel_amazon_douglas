@@ -18,7 +18,9 @@ ccflags-y += -I$(srctree)/drivers/misc/mediatek/video/$(MTK_PLATFORM)/videox/ \
 
 subdir-ccflags-$(CONFIG_MTK_LCM) += -I$(srctree)/drivers/misc/mediatek/lcm/inc
 
-ifeq ($(CONFIG_MTK_SEC_VIDEO_PATH_SUPPORT),y)
+subdir-ccflags-$(CONFIG_MTK_LCM) += -Wframe-larger-than=2048
+
+ifeq ($(CONFIG_MTK_SEC_VIDEO_PATH_FULL_SUPPORT),y)
 ccflags-y += -I$(srctree)/include
 ccflags-y += -I$(srctree)/include/trustzone
 endif
