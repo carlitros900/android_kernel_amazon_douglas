@@ -196,8 +196,6 @@ static int debug_shrinker_show(struct seq_file *s, void *unused)
 
 	sc.gfp_mask = -1;
 	sc.nr_to_scan = 0;
-	sc.nid = 0;
-	node_set(sc.nid, sc.nodes_to_scan);
 
 	down_read(&shrinker_rwsem);
 	list_for_each_entry(shrinker, &shrinker_list, list) {
@@ -1425,7 +1423,7 @@ static int too_many_isolated(struct zone *zone, int file,
 {
 	unsigned long inactive, isolated;
 
-	if (current_is_kswapd() || sc->hibernation_mode)
+	if (current_is_kswapd())
 		return 0;
 
 	if (!global_reclaim(sc))
@@ -1913,58 +1911,12 @@ static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
 	return shrink_inactive_list(nr_to_scan, lruvec, sc, lru);
 }
 
-static int vmscan_swappiness(struct scan_control *sc)
-{
-	if (global_reclaim(sc))
-		return vm_swappiness;
-	return mem_cgroup_swappiness(sc->target_mem_cgroup);
-}
-
 enum scan_balance {
 	SCAN_EQUAL,
 	SCAN_FRACT,
 	SCAN_ANON,
 	SCAN_FILE,
 };
-
-
-#ifdef CONFIG_ZRAM
-static int vmscan_swap_file_ratio = 1;
-module_param_named(swap_file_ratio, vmscan_swap_file_ratio, int, S_IRUGO | S_IWUSR);
-
-#if defined(CONFIG_ZRAM) && defined(CONFIG_MTK_GMO_RAM_OPTIMIZE)
-
-/* vmscan debug */
-static int vmscan_swap_sum = 200;
-module_param_named(swap_sum, vmscan_swap_sum, int, S_IRUGO | S_IWUSR);
-
-
-static int vmscan_scan_file_sum;	/* 0 */
-static int vmscan_scan_anon_sum;	/* 0 */
-static int vmscan_recent_scanned_anon;	/* 0 */
-static int vmscan_recent_scanned_file;	/* 0 */
-static int vmscan_recent_rotated_anon;	/* 0 */
-static int vmscan_recent_rotated_file;	/* 0 */
-module_param_named(scan_file_sum, vmscan_scan_file_sum, int, S_IRUGO);
-module_param_named(scan_anon_sum, vmscan_scan_anon_sum, int, S_IRUGO);
-module_param_named(recent_scanned_anon, vmscan_recent_scanned_anon, int, S_IRUGO);
-module_param_named(recent_scanned_file, vmscan_recent_scanned_file, int, S_IRUGO);
-module_param_named(recent_rotated_anon, vmscan_recent_rotated_anon, int, S_IRUGO);
-module_param_named(recent_rotated_file, vmscan_recent_rotated_file, int, S_IRUGO);
-#endif /* CONFIG_ZRAM */
-
-static int vmscan_duration_ms = 200;
-static int vmscan_threshold = 3000;
-module_param_named(duration_ms, vmscan_duration_ms, int, S_IRUGO | S_IWUSR);
-module_param_named(threshold, vmscan_threshold, int, S_IRUGO | S_IWUSR);
-
-#if defined(CONFIG_ZRAM) && defined(CONFIG_MTK_GMO_RAM_OPTIMIZE)
-/* #define LOGTAG "VMSCAN" */
-static unsigned long t;	/* 0 */
-static unsigned long history[2] = {0};
-#endif
-
-#endif /* CONFIG_ZRAM */
 
 /*
  * Determine how aggressively the anon and file LRU lists should be
@@ -1990,11 +1942,6 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	enum lru_list lru;
 	bool some_scanned;
 	int pass;
-#if defined(CONFIG_ZRAM) && defined(CONFIG_MTK_GMO_RAM_OPTIMIZE)
-	int cpu;
-	unsigned long SwapinCount = 0, SwapoutCount = 0, cached = 0;
-	bool bThrashing = false;
-#endif
 
 	/*
 	 * If the zone or memcg is small, nr[l] can be 0.  This
@@ -2024,7 +1971,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	 * using the memory controller's swap limit feature would be
 	 * too expensive.
 	 */
-	if (!global_reclaim(sc) && !vmscan_swappiness(sc)) {
+	if (!global_reclaim(sc) && !swappiness) {
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
@@ -2034,7 +1981,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	 * system is close to OOM, scan both anon and file equally
 	 * (unless the swappiness setting disagrees with swapping).
 	 */
-	if (!sc->priority && vmscan_swappiness(sc)) {
+	if (!sc->priority && swappiness) {
 		scan_balance = SCAN_EQUAL;
 		goto out;
 	}
@@ -2077,72 +2024,8 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	 * With swappiness at 100, anonymous and file have the same priority.
 	 * This scanning priority is essentially the inverse of IO cost.
 	 */
-	anon_prio = vmscan_swappiness(sc);
+	anon_prio = swappiness;
 	file_prio = 200 - anon_prio;
-
-	anon  = get_lru_size(lruvec, LRU_ACTIVE_ANON) +
-		get_lru_size(lruvec, LRU_INACTIVE_ANON);
-	file  = get_lru_size(lruvec, LRU_ACTIVE_FILE) +
-		get_lru_size(lruvec, LRU_INACTIVE_FILE);
-
-	/*
-	 * With swappiness at 100, anonymous and file have the same priority.
-	 * This scanning priority is essentially the inverse of IO cost.
-	 */
-#if defined(CONFIG_ZRAM) && defined(CONFIG_MTK_GMO_RAM_OPTIMIZE)
-	if (vmscan_swap_file_ratio) {
-		if (t == 0)
-			t = jiffies;
-
-		if (time_after(jiffies, t + vmscan_duration_ms/1000 * HZ)) {
-
-			for_each_online_cpu(cpu) {
-				struct vm_event_state *this = &per_cpu(vm_event_states, cpu);
-
-				SwapinCount += this->event[PSWPIN];
-				SwapoutCount += this->event[PSWPOUT];
-			}
-
-			if (((SwapinCount-history[0] + SwapoutCount - history[1]) / (jiffies-t+1) * HZ)	>
-				vmscan_threshold) {
-				bThrashing = true;
-				/* pr_debug(ANDROID_LOG_ERROR, LOGTAG, "!!! thrashing !!!\n"); */
-			} else{
-				bThrashing = false;
-				/* pr_debug(ANDROID_LOG_WARN, LOGTAG, "!!! NO thrashing !!!\n"); */
-			}
-			history[0] = SwapinCount;
-			history[1] = SwapoutCount;
-
-			t = jiffies;
-		}
-
-
-		if (!bThrashing) {
-			anon_prio = (vmscan_swappiness(sc) * anon) / (anon + file + 1);
-			file_prio = (vmscan_swap_sum - vmscan_swappiness(sc)) * file / (anon + file + 1);
-
-		} else {
-			cached = global_page_state(NR_FILE_PAGES) - global_page_state(NR_SHMEM) -
-				total_swapcache_pages();
-			if (cached > lowmem_minfree[2]) {
-				anon_prio = vmscan_swappiness(sc);
-				file_prio = vmscan_swap_sum - vmscan_swappiness(sc);
-			} else {
-				anon_prio = (vmscan_swappiness(sc) * anon) / (anon + file + 1);
-				file_prio = (vmscan_swap_sum - vmscan_swappiness(sc)) * file / (anon + file + 1);
-			}
-		}
-	} else {
-		anon_prio = vmscan_swappiness(sc);
-		file_prio = vmscan_swap_sum - vmscan_swappiness(sc);
-	}
-#elif defined(CONFIG_ZRAM) /* CONFIG_ZRAM */
-	if (vmscan_swap_file_ratio) {
-		anon_prio = anon_prio * anon / (anon + file + 1);
-		file_prio = file_prio * file / (anon + file + 1);
-	}
-#endif /* CONFIG_ZRAM */
 
 	/*
 	 * OK, so we have swap space and a fair amount of page cache
@@ -2155,6 +2038,12 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	 *
 	 * anon in [0], file in [1]
 	 */
+
+	anon  = get_lru_size(lruvec, LRU_ACTIVE_ANON) +
+		get_lru_size(lruvec, LRU_INACTIVE_ANON);
+	file  = get_lru_size(lruvec, LRU_ACTIVE_FILE) +
+		get_lru_size(lruvec, LRU_INACTIVE_FILE);
+
 	spin_lock_irq(&zone->lru_lock);
 	if (unlikely(reclaim_stat->recent_scanned[0] > anon / 4)) {
 		reclaim_stat->recent_scanned[0] /= 2;
@@ -2371,9 +2260,6 @@ static inline bool should_continue_reclaim(struct zone *zone,
 {
 	unsigned long pages_for_compaction;
 	unsigned long inactive_lru_pages;
-
-	if (nr_reclaimed && nr_scanned && sc->nr_to_reclaim >= sc->nr_reclaimed)
-		return true;
 
 	/* If not in reclaim/compaction mode, stop */
 	if (!in_reclaim_compaction(sc))
@@ -2668,11 +2554,6 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 	unsigned long total_scanned = 0;
 	unsigned long writeback_threshold;
 	bool zones_reclaimable;
-
-#ifdef CONFIG_FREEZER
-	if (unlikely(pm_freezing && !sc->hibernation_mode))
-		return 0;
-#endif
 
 	delayacct_freepages_start();
 
@@ -3561,11 +3442,6 @@ void wakeup_kswapd(struct zone *zone, int order, enum zone_type classzone_idx)
 	if (!populated_zone(zone))
 		return;
 
-#ifdef CONFIG_FREEZER
-	if (pm_freezing)
-		return;
-#endif
-
 	if (!cpuset_zone_allowed_hardwall(zone, GFP_KERNEL))
 		return;
 	pgdat = zone->zone_pgdat;
@@ -3591,7 +3467,7 @@ void wakeup_kswapd(struct zone *zone, int order, enum zone_type classzone_idx)
  * LRU order by reclaiming preferentially
  * inactive > active > active referenced > active mapped
  */
-unsigned long shrink_memory_mask(unsigned long nr_to_reclaim, gfp_t mask)
+unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
 {
 	struct reclaim_state reclaim_state;
 	struct scan_control sc = {
@@ -3620,13 +3496,6 @@ unsigned long shrink_memory_mask(unsigned long nr_to_reclaim, gfp_t mask)
 
 	return nr_reclaimed;
 }
-EXPORT_SYMBOL_GPL(shrink_memory_mask);
-
-unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
-{
-	return shrink_memory_mask(nr_to_reclaim, GFP_HIGHUSER_MOVABLE);
-}
-EXPORT_SYMBOL_GPL(shrink_all_memory);
 #endif /* CONFIG_HIBERNATION */
 
 /* It's optimal to keep kswapds on the same CPUs as their memory, but
