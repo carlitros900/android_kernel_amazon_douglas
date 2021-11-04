@@ -284,6 +284,9 @@ static int dt2w_input_connect(struct input_handler *handler,
 	struct input_handle *handle;
 	int error;
 
+	if (!dev)
+		return -ENODEV; 
+
 	if (input_dev_filter(dev))
 		return -ENODEV;
 
